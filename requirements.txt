@@ -1,0 +1,6 @@
+swanlab
+gymnasium
+numpy
+torch
+pygame
+moviepy
