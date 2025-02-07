@@ -26,6 +26,19 @@ device = (
 )
 print(f"Using device: {device}")
 
+# 修改训练过程
+def make_env(env_name, seed=None):
+    env = gym.make(env_name)
+    if seed is not None:
+        env.seed(seed)
+    env = ResizeObservation(env, (84, 84))
+    env = GrayscaleObservation(env)
+    env = FrameStackObservation(env, 4)
+    # 新增维度转置操作（将通道维度放到最前面）
+    # env = gym.wrappers.TransformObservation(env, lambda obs: np.transpose(obs, (2, 0, 1)), None)
+    env = ClipReward(env, min_reward=-1.0, max_reward=1.0)
+    return env
+
 # 修改Q网络为CNN结构
 class QNetwork(nn.Module):
     def __init__(self, action_dim):
@@ -67,6 +80,7 @@ class DQNAgent:
         self.best_reward = 0
         self.best_avg_reward = 0
         self.eval_episodes = 3
+        self.tau = 0.005
 
     def choose_action(self, state):
         if np.random.rand() < self.epsilon:
@@ -115,6 +129,10 @@ class DQNAgent:
             self.target_net.load_state_dict({
                 k: v.clone() for k, v in self.q_net.state_dict().items()
             })
+        
+        # 软更新目标网络
+        # for target_param, q_param in zip(self.target_net.parameters(), self.q_net.parameters()):
+        #     target_param.data.copy_(self.tau * q_param.data + (1 - self.tau) * target_param.data)
             
         return loss.item()
 
@@ -151,17 +169,6 @@ class DQNAgent:
         self.epsilon = original_epsilon  # 恢复探索
         return np.mean(total_rewards)
 
-# 修改训练过程
-def make_env(env_name, seed=None):
-    env = gym.make(env_name)
-    if seed is not None:
-        env.seed(seed)
-    env = ResizeObservation(env, (84, 84))
-    env = GrayscaleObservation(env)
-    env = FrameStackObservation(env, 4)
-    env = ClipReward(env, min_reward=-1.0, max_reward=1.0)
-    return env
-
 # 使用Atari环境
 env = make_env('ALE/Breakout-v5')
 action_dim = env.action_space.n
@@ -170,7 +177,7 @@ agent = DQNAgent(action_dim)
 # 更新SwanLab配置
 swanlab.init(
     project="RL-All-In-One",
-    experiment_name="DQN-Breakout-v5",
+    experiment_name="10k次训练",
     config={
         "action_dim": action_dim,
         "batch_size": agent.batch_size,
@@ -182,7 +189,7 @@ swanlab.init(
         "episode": 1000,
         "epsilon_start": 1.0,
         "epsilon_end": 0.1,
-        "epsilon_decay": 0.99,
+        "epsilon_decay": 0.999,
     },
     description="DQN for Atari Breakout game",
 )
@@ -251,27 +258,33 @@ for episode in range(swanlab.config["episode"]):
 agent.epsilon = 0  # 关闭探索策略
 test_env = gym.make('ALE/Breakout-v5', render_mode='rgb_array')
 test_env = RecordVideo(test_env, "./dqn_videos", episode_trigger=lambda x: True)  # 保存所有测试回合
+# 添加与训练环境相同的预处理包装器
+test_env = ResizeObservation(test_env, (84, 84))
+test_env = GrayscaleObservation(test_env)
+test_env = FrameStackObservation(test_env, 4)
+test_env = ClipReward(test_env, min_reward=-1.0, max_reward=1.0)
+
 agent.q_net.load_state_dict(agent.best_net.state_dict())  # 使用最佳模型
 
-for episode in range(3):  # 录制3个测试回合
-    state = test_env.reset()[0]
-    total_reward = 0
-    steps = 0
-    
-    while True:
-        # 确保状态张量的形状正确
-        if not isinstance(state, np.ndarray):
-            state = np.array(state)
-        action = agent.choose_action(state)
-        next_state, reward, done, _, _ = test_env.step(action)
-        total_reward += reward
-        state = next_state
-        steps += 1
+try:
+    for episode in range(3):  # 录制3个测试回合
+        state = test_env.reset()[0]
+        total_reward = 0
+        steps = 0
         
-        if done or steps>=1500:  # 限制每个episode最多2000步
-            break
-    
-    print(f"Test Episode: {episode}, Reward: {total_reward}")
-
-test_env.close()
+        while True:
+            action = agent.choose_action(state)  # 移除了状态类型检查，因为现在预处理确保了正确的格式
+            next_state, reward, done, _, _ = test_env.step(action)
+            total_reward += reward
+            state = next_state
+            steps += 1
+            
+            if done or steps >= 1500:  # 限制每个episode最多1500步
+                break
+        
+        print(f"Test Episode: {episode}, Reward: {total_reward}")
+except Exception as e:
+    print(f"测试过程中发生错误: {e}")
+finally:
+    test_env.close()
 

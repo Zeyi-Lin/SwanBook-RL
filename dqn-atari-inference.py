@@ -105,8 +105,6 @@ class DQNAgent:
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-        
-        # print(f"Episode {episode}, Step {self.step_count}, Loss: {loss.item()}")
 
         # 定期更新目标网络
         self.step_count += 1
@@ -197,7 +195,7 @@ for episode in range(3):  # 录制3个测试回合
         state = next_state
         steps += 1
         
-        if done or steps>=10000:  # 限制每个episode最多2000步
+        if done or steps>=100000:  # 限制每个episode最多2000步
             break
     
     print(f"Test Episode: {episode}, Reward: {total_reward}, Steps: {steps}")
