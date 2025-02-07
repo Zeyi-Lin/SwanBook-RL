@@ -162,93 +162,25 @@ def make_env(env_name, seed=None):
     env = ClipReward(env, min_reward=-1.0, max_reward=1.0)
     return env
 
-# 使用Atari环境
+# 初始化环境和智能体
 env = make_env('ALE/Breakout-v5')
 action_dim = env.action_space.n
 agent = DQNAgent(action_dim)
 
-# 更新SwanLab配置
-swanlab.init(
-    project="RL-All-In-One",
-    experiment_name="DQN-Breakout-v5",
-    config={
-        "action_dim": action_dim,
-        "batch_size": agent.batch_size,
-        "gamma": agent.gamma,
-        "epsilon": agent.epsilon,
-        "update_target_freq": agent.update_target_freq,
-        "replay_buffer_size": agent.replay_buffer.maxlen,
-        "learning_rate": agent.optimizer.param_groups[0]['lr'],
-        "episode": 1000,
-        "epsilon_start": 1.0,
-        "epsilon_end": 0.1,
-        "epsilon_decay": 0.99,
-    },
-    description="DQN for Atari Breakout game",
-)
-
-# ========== 训练阶段 ==========
-
-agent.epsilon = swanlab.config["epsilon_start"]
-
-for episode in range(swanlab.config["episode"]):
-    state = env.reset()[0]
-    total_reward = 0
-    total_loss = 0
-    
-    while True:
-        action = agent.choose_action(state)
-        next_state, reward, done, _, _ = env.step(action)
-        agent.store_experience(state, action, reward, next_state, done)
-        loss = agent.train(episode)
-        if loss is not None:
-            total_loss += loss
-            
-        if agent.step_count % agent.update_target_freq == 0 and total_loss > 0:
-            swanlab.log(
-                {
-                    "train/loss": total_loss/agent.update_target_freq,
-                },
-                step=agent.step_count,
-            )
-            print(f"Step {agent.step_count}, Loss: {total_loss/agent.update_target_freq}")
-
-        total_reward += reward
-        state = next_state
-        if done or total_reward > 2e4:
-            break
-    
-    # epsilon是探索系数，随着每一轮训练，epsilon 逐渐减小
-    agent.epsilon = max(swanlab.config["epsilon_end"], agent.epsilon * swanlab.config["epsilon_decay"])  
-    
-    # 每10个episode评估一次模型
-    if episode % 10 == 0:
-        print("Evaluating...")
-        avg_reward = agent.evaluate(env)  # 直接传入已经预处理的环境
-        print(f"Episode {episode}, Reward: {avg_reward}")
-        
-        if avg_reward > agent.best_avg_reward:
-            agent.best_avg_reward = avg_reward
-            agent.best_net.load_state_dict({k: v.clone() for k, v in agent.q_net.state_dict().items()})
-            agent.save_model(path=f"./output/best_model.pth")
-            print(f"New best model saved with average reward: {avg_reward}")
-
-    print(f"Episode: {episode}, Train Reward: {total_reward}, Best Eval Avg Reward: {agent.best_avg_reward}")
-    
-    swanlab.log(
-        {
-            "train/reward": total_reward,
-            "eval/best_avg_reward": agent.best_avg_reward,
-            "train/epsilon": agent.epsilon,
-        },
-        step=episode,
-    )
+# 加载预训练模型
+model_path = "./output/best_model.pth"
+agent.q_net.load_state_dict(torch.load(model_path))
+print(f"Loaded model from {model_path}")
 
 # 测试并录制视频
 agent.epsilon = 0  # 关闭探索策略
 test_env = gym.make('ALE/Breakout-v5', render_mode='rgb_array')
-test_env = RecordVideo(test_env, "./dqn_videos", episode_trigger=lambda x: True)  # 保存所有测试回合
-agent.q_net.load_state_dict(agent.best_net.state_dict())  # 使用最佳模型
+# 添加与训练时相同的预处理包装器
+test_env = ResizeObservation(test_env, (84, 84))
+test_env = GrayscaleObservation(test_env)
+test_env = FrameStackObservation(test_env, 4)
+test_env = ClipReward(test_env, min_reward=-1.0, max_reward=1.0)
+test_env = RecordVideo(test_env, "./dqn_videos", episode_trigger=lambda x: True)
 
 for episode in range(3):  # 录制3个测试回合
     state = test_env.reset()[0]
@@ -265,10 +197,9 @@ for episode in range(3):  # 录制3个测试回合
         state = next_state
         steps += 1
         
-        if done or steps>=1500:  # 限制每个episode最多2000步
+        if done or steps>=10000:  # 限制每个episode最多2000步
             break
     
-    print(f"Test Episode: {episode}, Reward: {total_reward}")
+    print(f"Test Episode: {episode}, Reward: {total_reward}, Steps: {steps}")
 
 test_env.close()
-
