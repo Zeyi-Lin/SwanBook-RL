@@ -195,6 +195,7 @@ for episode in range(swanlab.config["episode"]):
     state = env.reset()[0]
     total_reward = 0
     total_loss = 0
+    total_steps = 0
     
     while True:
         action = agent.choose_action(state)
@@ -215,7 +216,8 @@ for episode in range(swanlab.config["episode"]):
 
         total_reward += reward
         state = next_state
-        if done or total_reward > 2e4:
+        total_steps += 1
+        if done or total_steps >= 5000:
             break
     
     # epsilon是探索系数，随着每一轮训练，epsilon 逐渐减小
@@ -240,6 +242,7 @@ for episode in range(swanlab.config["episode"]):
             "train/reward": total_reward,
             "eval/best_avg_reward": agent.best_avg_reward,
             "train/epsilon": agent.epsilon,
+            "train/episode_steps": total_steps,
         },
         step=episode,
     )
