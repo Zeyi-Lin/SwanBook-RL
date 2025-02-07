@@ -1,1 +1,3 @@
 best_model.pth
+output/
+dqn_videos/

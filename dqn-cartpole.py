@@ -1,5 +1,5 @@
 import gymnasium as gym
-from gymnasium.wrappers import RecordVideo  # 新增导入
+from gymnasium.wrappers import RecordVideo
 import numpy as np
 import torch
 import torch.nn as nn
@@ -7,16 +7,13 @@ import torch.optim as optim
 from collections import deque
 import random
 import swanlab
+import os
 
 # 设置随机数种子
 SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-print(f"Using device: {device}")
 
 # 定义Q网络
 class QNetwork(nn.Module):
@@ -29,7 +26,6 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(64, action_dim)
         )
-        self.to(device)  # 将网络移到指定设备
     
     def forward(self, x):
         return self.fc(x)
@@ -39,6 +35,7 @@ class DQNAgent:
     def __init__(self, state_dim, action_dim):
         self.q_net = QNetwork(state_dim, action_dim)       # 当前网络
         self.target_net = QNetwork(state_dim, action_dim)  # 目标网络
+        self.target_net.load_state_dict(self.q_net.state_dict())  # 将目标网络和当前网络初始化一致，避免网络不一致导致的训练波动
         self.best_net = QNetwork(state_dim, action_dim)
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=1e-3)
         self.replay_buffer = deque(maxlen=10000)           # 经验回放缓冲区
@@ -47,14 +44,15 @@ class DQNAgent:
         self.epsilon = 0.1
         self.update_target_freq = 100  # 目标网络更新频率
         self.step_count = 0
-        self.log_loss = 0
         self.best_reward = 0
+        self.best_avg_reward = 0
+        self.eval_episodes = 5  # 评估时的episode数量
 
     def choose_action(self, state):
         if np.random.rand() < self.epsilon:
             return np.random.randint(0, 2)  # CartPole有2个动作（左/右）
         else:
-            state_tensor = torch.FloatTensor(state).to(device)
+            state_tensor = torch.FloatTensor(state)
             q_values = self.q_net(state_tensor)
             return q_values.cpu().detach().numpy().argmax()
 
@@ -69,11 +67,11 @@ class DQNAgent:
         batch = random.sample(self.replay_buffer, self.batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
 
-        states = torch.FloatTensor(np.array(states)).to(device)
-        actions = torch.LongTensor(actions).to(device)
-        rewards = torch.FloatTensor(rewards).to(device)
-        next_states = torch.FloatTensor(np.array(next_states)).to(device)
-        dones = torch.FloatTensor(dones).to(device)
+        states = torch.FloatTensor(np.array(states))
+        actions = torch.LongTensor(actions)
+        rewards = torch.FloatTensor(rewards)
+        next_states = torch.FloatTensor(np.array(next_states))
+        dones = torch.FloatTensor(dones)
 
         # 计算当前Q值
         current_q = self.q_net(states).gather(1, actions.unsqueeze(1)).squeeze()
@@ -85,7 +83,6 @@ class DQNAgent:
 
         # 计算损失并更新网络
         loss = nn.MSELoss()(current_q, target_q)
-        # self.log_loss += loss.item()
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
@@ -98,10 +95,33 @@ class DQNAgent:
                 k: v.clone() for k, v in self.q_net.state_dict().items()
             })
 
-    def save_model(self, path="best_model.pth"):
+    def save_model(self, path="./output/best_model.pth"):
+        if not os.path.exists("./output"):
+            os.makedirs("./output")
         torch.save(self.q_net.state_dict(), path)
         print(f"Model saved to {path}")
         
+    def evaluate(self, env):
+        """评估当前模型的性能"""
+        original_epsilon = self.epsilon
+        self.epsilon = 0  # 关闭探索
+        total_rewards = []
+
+        for _ in range(self.eval_episodes):
+            state = env.reset()[0]
+            episode_reward = 0
+            while True:
+                action = self.choose_action(state)
+                next_state, reward, done, _, _ = env.step(action)
+                episode_reward += reward
+                state = next_state
+                if done or episode_reward > 2e4:
+                    break
+            total_rewards.append(episode_reward)
+
+        self.epsilon = original_epsilon  # 恢复探索
+        return np.mean(total_rewards)
+
 # 训练过程
 env = gym.make('CartPole-v1')
 state_dim = env.observation_space.shape[0]
@@ -122,42 +142,56 @@ swanlab.init(
         "update_target_freq": agent.update_target_freq,
         "replay_buffer_size": agent.replay_buffer.maxlen,
         "learning_rate": agent.optimizer.param_groups[0]['lr'],
-        "device": device,
-        "episode": 300,
+        "episode": 600,
+        "epsilon_start": 1.0,
+        "epsilon_end": 0.01,
+        "epsilon_decay": 0.995,
     },
+    description="增加了初始化目标网络和当前网络一致，避免网络不一致导致的训练波动"
 )
 
+# ========== 训练阶段 ==========
+
+agent.epsilon = swanlab.config["epsilon_start"]
+
 for episode in range(swanlab.config["episode"]):
-    state = env.reset()[0] # 获取初始状态
+    state = env.reset()[0]
     total_reward = 0
-
-    # 开启循环
-    while True:
-        action = agent.choose_action(state)  # 选择动作（有概率随机探索）
-        next_state, reward, done, _, _ = env.step(action)  # 执行动作，获取下一个状态、奖励、是否结束等信息
-        agent.store_experience(state, action, reward, next_state, done)  # 存储经验
-        origin_q_net = agent.q_net.state_dict().copy()  # 创建当前网络的副本
-        agent.train()  # 训练网络，更新参数
-        total_reward += reward  # 累加奖励
-        state = next_state  # 更新状态
-        if done:  # 如果结束，则跳出循环
-            if total_reward > agent.best_reward:  # 如果当前奖励大于最佳奖励
-                agent.best_reward = total_reward  # 更新最佳奖励
-                # 深拷贝当前最优模型的参数
-                agent.best_net.load_state_dict({
-                    k: v.clone() for k, v in origin_q_net.items()
-                })
-                agent.save_model()  # 保存最佳模型
-                print("save model, best reward: ", agent.best_reward)
-            break
-
     
-    print(f"Episode: {episode}, Reward: {total_reward}, Best Reward: {agent.best_reward}")
+    while True:
+        action = agent.choose_action(state)
+        next_state, reward, done, _, _ = env.step(action)
+        agent.store_experience(state, action, reward, next_state, done)
+        agent.train()
+
+        total_reward += reward
+        state = next_state
+        if done or total_reward > 2e4:
+            break
+    
+    # epsilon是探索系数，随着每一轮训练，epsilon 逐渐减小
+    agent.epsilon = max(swanlab.config["epsilon_end"], agent.epsilon * swanlab.config["epsilon_decay"])  
+    
+    # 每10个episode评估一次模型
+    if episode % 10 == 0:
+        eval_env = gym.make('CartPole-v1')
+        avg_reward = agent.evaluate(eval_env)
+        eval_env.close()
+        
+        if avg_reward > agent.best_avg_reward:
+            agent.best_avg_reward = avg_reward
+            # 深拷贝当前最优模型的参数
+            agent.best_net.load_state_dict({k: v.clone() for k, v in agent.q_net.state_dict().items()})
+            agent.save_model(path=f"./output/best_model.pth")
+            print(f"New best model saved with average reward: {avg_reward}")
+
+    print(f"Episode: {episode}, Train Reward: {total_reward}, Best Eval Avg Reward: {agent.best_avg_reward}")
     
     swanlab.log(
         {
             "train/reward": total_reward,
-            "train/best_reward": agent.best_reward
+            "eval/best_avg_reward": agent.best_avg_reward,
+            "train/epsilon": agent.epsilon
         },
         step=episode,
     )
