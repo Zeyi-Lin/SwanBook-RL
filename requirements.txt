@@ -4,3 +4,5 @@ numpy
 torch
 pygame
 moviepy
+opencv-python
+ale_py
